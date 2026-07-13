@@ -1,5 +1,6 @@
 local action = require("./action")
 local graph = require("../reactive/graph")
+local properties = require("./properties")
 local scheduler = require("../scheduler")
 local types = require("../reactive/types")
 
@@ -207,7 +208,7 @@ local function evaluate(inst: Instance, props: { [unknown & number]: unknown }, 
 	return resulting_array
 end
 
-local function bind(inst: Instance, props: { [unknown & number]: unknown })
+local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
 	local pairings = evaluate(inst, props)
 	local parent: (ReactivePropertyPair<Instance> | PropertyPair<Instance>)? = nil
 

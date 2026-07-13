@@ -1,6 +1,9 @@
-local action = require("./action")
 local bind = require("./bind")
+local properties = require("./properties")
 
+export type PropertiesFor<T> = properties.PropertiesFor<T>
+
+type instance = Instance
 type Instances = {
 	PyramidHandleAdornment: PyramidHandleAdornment,
 	AudioChannelSplitter: AudioChannelSplitter,
@@ -86,125 +89,12 @@ type Instances = {
 	Wire: Wire,
 }
 
-type UnknownConnectCallback = (...any) -> ()
-
-type Signal = RBXScriptSignal
-
-type function get_connect(v: type): type?
-	local connect = v:readproperty(types.singleton("Connect"))
-
-	if connect and connect:is("function") then
-		local head = connect:parameters().head
-
-		if not head then
-			return nil
-		end
-		local callback = head[2]
-
-		if callback and callback:is("function") then
-			return callback
-		end
+type function GetInstance(input: type, instances: type): type
+	if input:is("singleton") then
+		return instances:readproperty(input) or instance
 	end
 
-	return nil
-end
-
-type function is_signal(v: type): type?
-	if v == Signal and v.tag == "extern" then
-		return UnknownConnectCallback
-	-- luau lsp types RBXScriptSignals as tables
-	elseif v.tag == "table" then
-		local connect = get_connect(v)
-
-		if connect then
-			return connect
-		end
-
-		-- i cba to test if this is needed or not
-		local metatable = v:metatable()
-
-		if metatable then
-			connect = get_connect(metatable)
-
-			if connect then
-				return connect
-			end
-		end
-	end
-
-	return nil
-end
-
-type instance = Instance
-
-type Action = action.Identity
-
-type function GetInstance(class_name: type, instances: type): type
-	if not class_name:is("singleton") then
-		return instance
-	end
-
-	return instances:readproperty(class_name) or instance
-end
-
-export type function PropertiesFor(class_name: type): type
-	local object = GetInstance(class_name, Instances)
-	local head_table = {}
-	local args_table = { head = head_table }
-	local properties = types.newtable()
-	local current = object
-	local empty_table = {}
-
-	local read_only_properties = table.freeze({
-		types.singleton("RobloxLocked"),
-		types.singleton("ClassName"),
-		types.singleton("UniqueId"),
-	})
-
-	while current do
-		for property, value in current:properties() do
-			if table.find(read_only_properties, property) then
-				continue
-			end
-
-			local value_read = value.read
-			local callback = is_signal(value_read)
-
-			if callback then
-				properties:setproperty(property, types.optional(callback))
-			elseif value_read.tag == "function" or value_read.tag == "intersection" then
-				continue
-			elseif value.write then
-				head_table[1] = value_read
-
-				properties:setproperty(
-					property,
-					types.optional(
-						types.unionof(types.newfunction(empty_table :: any, args_table :: any), value.write)
-					)
-				)
-			end
-		end
-
-		current = current:readparent()
-	end
-
-	-- Functions returning a child can return an array of children, or alike functions, nested to any level
-	local function_returns_child = types.newfunction()
-	local child_only_union = types.unionof(function_returns_child, instance)
-
-	-- TODO: Use a read only indexer when released to properly accept children which are subtypes of `Instance`
-	-- TODO: Nesting throws a type error, seemingly a solver bug caused whenever the keys are a union instead of direct type
-	-- Happens even with a union between `Instance` and `any`, but disappears when it's just `Instance`
-	local nested_table_or_function_or_child = types.newtable()
-	local nested_child_union = types.unionof(child_only_union, nested_table_or_function_or_child)
-	nested_table_or_function_or_child:setreadindexer(types.number, nested_child_union)
-	function_returns_child:setreturns({ nested_child_union })
-
-	local full_union = types.unionof(child_only_union, Action, properties)
-	properties:setreadindexer(types.number, types.optional(full_union))
-
-	return properties
+	return instance
 end
 
 local function try_create_instance(class_name: string): Instance
@@ -216,9 +106,11 @@ end
 
 local function create<ClassName>(
 	class_name: ClassName | keyof<Instances> | ""
-): (props: PropertiesFor<ClassName>) -> GetInstance<ClassName, Instances>
+): (
+	props: PropertiesFor<GetInstance<ClassName, Instances>>
+) -> GetInstance<ClassName, Instances>
 	return function(properties)
-		return bind(try_create_instance(class_name), properties) :: any
+		return (bind :: any)(try_create_instance(class_name), properties)
 	end
 end
 
