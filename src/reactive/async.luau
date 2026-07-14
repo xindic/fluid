@@ -1,5 +1,6 @@
 local graph = require("./graph")
 local logging = require("../logging")
+local scheduler = require("@src/scheduler")
 local task = task or require("@lute/task")
 
 type State = "busy" | "ok"
@@ -14,8 +15,6 @@ unlike an effect though, all evaluations are deferred since we make the assumpti
 that async yields every single time.
 ]]
 
-local cancel = task.cancel or coroutine.close
-
 local function async<T>(callback: (set: (T) -> ()) -> T): (() -> T, () -> State)
 	local reactive_node: graph.ReactiveNode<any>
 	local value: graph.ReactiveNode<T> = graph.create_reactive_node(
@@ -28,12 +27,12 @@ local function async<T>(callback: (set: (T) -> ()) -> T): (() -> T, () -> State)
 	local state: graph.SourceNode<State> = graph.create_source_node("ok") :: any
 
 	local function set(new: T)
-		graph.update_source_node<<T>>(value, new)
+		graph.update_node<<T>>(value, new)
 	end
 
 	local function update()
 		assert(reactive_node, "reactive node does not exist")
-		graph.update_source_node(state, "busy")
+		graph.update_node(state, "busy")
 
 		-- manually set the node to be busy
 		local thread = task.spawn(function()
@@ -41,20 +40,20 @@ local function async<T>(callback: (set: (T) -> ()) -> T): (() -> T, () -> State)
 			graph.destroy_owned(value)
 
 			value.state = coroutine.running()
-			local call = graph.run_as(value, callback, set)
+			local ok, call = graph.run_as(value, callback, set)
 
-			if call then
+			if ok then
 				set(call)
 			else
-				logging.warn(`async effect error: {call.err} {call.trace}`)
+				logging.warn(call.trace)
 			end
 
-			graph.update_source_node(state, "ok")
+			graph.update_node(state, "ok")
 			value.state = "clean"
 		end)
 
 		graph.push_cleanup(reactive_node, function()
-			cancel(thread)
+			scheduler.cancel(thread)
 		end)
 	end
 

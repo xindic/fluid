@@ -38,22 +38,32 @@ If it cannot find any of these, the error `cleanup_unknown_destructor` will be c
 
 Self explanatory.
 
-## root_user_errored:
+## root_fn_error:
 
 Self explanatory.
 
 # Interval
 
-## interval_user_yielded
+## interval_fn_yielded
 
-## interval_user_errored
+## interval_fn_errored
 
 # Reactive Graph
 
-## effect_errored
+## effect_fn_errored
 
-## effect_yielded
+## effect_fn_yielded
 
 ## nil_in_deferred
 
-The internal graph r
+## recursive_dependency_depeqco
+
+## co_eq_node_state
+
+## dep_state_eq_co
+
+## scope_assertion_failed
+
+## stable_parent_assertion_failed
+
+## invalid_parent_scope
