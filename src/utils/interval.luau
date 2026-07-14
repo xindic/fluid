@@ -1,10 +1,8 @@
 local exception = require("./exception")
 local graph = require("../reactive/graph")
-local logging = require("@src/logging")
+local logging = require("../logging")
 local reactive_fn_calls = require("./reactive_fn_calls")
 local scheduler = require("../scheduler")
-
-local dev_mode = true
 
 local function interval_err_handler(err: unknown): exception.Identity
 	if exception.is(err) then
@@ -56,7 +54,7 @@ local function silent_interval_err_handler(err: unknown): exception.Identity
 end
 
 local function interval_yield_handler(thread: thread): exception.Identity
-	local formatted_trace = debug.traceback(thread, logging.errors.interval_user_yielded(), 3)
+	local formatted_trace = debug.traceback(thread, logging.errors.interval_user_yielded(), 1)
 
 	logging.warn(formatted_trace)
 
@@ -77,7 +75,7 @@ local function interval<T>(func: (dt: number) -> T, hz: number?, offset: number?
 
 	local node = graph.create_source_node(res)
 	local last_eval = offset and -offset or 0
-	local last_ok = false
+	local last_ok = true
 
 	local function on_render(dt: number)
 		if hz ~= nil then
@@ -90,8 +88,12 @@ local function interval<T>(func: (dt: number) -> T, hz: number?, offset: number?
 		end
 
 		if not last_ok then
-			local ok, res =
-				reactive_fn_calls.no_yield_call(func, silent_interval_err_handler, interval_yield_handler, dt)
+			local ok, res = reactive_fn_calls.no_yield_call(func, silent_interval_err_handler, function()
+				return exception.new({
+					kind = "yielded",
+					trace = debug.traceback(logging.errors.interval_user_yielded(), 2),
+				})
+			end, dt)
 
 			if ok then
 				last_ok = true

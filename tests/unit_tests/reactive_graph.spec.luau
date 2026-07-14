@@ -473,6 +473,7 @@ local function tests()
 				end)
 
 				coroutine.resume(thread)
+
 				CHECK(count == 4)
 			end
 
@@ -734,6 +735,7 @@ local function tests()
 				items({})
 				CHECK(#data() == 1)
 				CHECK(updates == 1)
+
 				step_scheduler()
 				items({ 1 }) -- should cancel thread
 				-- we need to evaluate for_keys again so it can cancel the thread.
@@ -1174,27 +1176,51 @@ local function tests()
 		end)
 	)
 
-	-- TEST(
-	-- 	"no yield in reactive scopes",
-	-- 	wrap_root(function()
-	-- 		do
-	-- 			CASE("works")
-	-- 			print("Testing")
+	TEST(
+		"no yield in reactive scopes",
+		wrap_root(function()
+			do
+				CASE("works")
 
-	-- 			local did_yield = false
-	-- 			hooks.logging.on_warn(function(text)
-	-- 				did_yield = string.find(text, "yield") ~= nil
-	-- 			end)
+				local did_yield = false
+				hooks.logging.on_warn(function(text)
+					did_yield = string.find(text, "yield") ~= nil
+				end)
 
-	-- 			fluid.effect(function()
-	-- 				coroutine.yield()
-	-- 				print("dies")
-	-- 			end)
+				pcall(fluid.effect, function()
+					coroutine.yield()
+				end)
 
-	-- 			CHECK(did_yield == true)
-	-- 		end
-	-- 	end)
-	-- )
+				hooks.logging.on_warn(nil)
+				CHECK(did_yield == true)
+			end
+
+			do
+				CASE("non-destructive erroring on yield")
+
+				local src = fluid.source(1)
+				local run_count = 0
+
+				pcall(function()
+					fluid.effect(function()
+						run_count += 1
+						if src() == 2 then
+							coroutine.yield()
+						end
+					end)
+				end)
+
+				CHECK(src() == 1)
+
+				pcall(function()
+					src(2)
+				end)
+
+				CHECK(src() == 2)
+				CHECK(run_count == 2)
+			end
+		end)
+	)
 end
 
 return tests
