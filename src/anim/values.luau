@@ -425,13 +425,7 @@ function values.pack<T>(value: T): (string, PackedValue, ValueType<T>)
 	local adapter = value_types[type_name]
 	assert(adapter ~= nil, `unsupported animation datatype {type_name}`)
 
-	local components = adapter.pack(value)
-	assert(
-		#components == adapter.count,
-		`invalid component count for {type_name}: expected {adapter.count}, got {#components}`
-	)
-
-	return type_name, components, adapter
+	return type_name, adapter.pack(value), adapter
 end
 
 function values.unpack(type_name: string, components: PackedValue): any

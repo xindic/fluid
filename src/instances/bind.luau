@@ -203,10 +203,9 @@ local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
 	process_props(inst, props :: any, pending, parent)
 
 	local property_count = #pending.property_names
-
 	local child_count = #pending.children
 
-	if property_count > 0 or child_count > 0 or (parent.present and type(parent.value) ~= "function") then
+	if property_count > 0 or child_count > 0 then
 		scheduler.defer(function()
 			for index = 1, property_count do
 				set_property(inst, pending.property_names[index], pending.property_values[index])
@@ -215,15 +214,15 @@ local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
 			for index = 1, child_count do
 				pending.children[index].Parent = inst
 			end
-
-			if parent.present and type(parent.value) ~= "function" then
-				set_property(inst, "Parent", parent.value)
-			end
 		end)
 	end
 
-	if parent.present and type(parent.value) == "function" then
-		bind_property(inst, "Parent", parent.value)
+	if parent.present then
+		if type(parent.value) == "function" then
+			bind_property(inst, "Parent", parent.value)
+		else
+			set_property(inst, "Parent", parent.value)
+		end
 	end
 
 	return inst

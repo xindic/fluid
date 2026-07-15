@@ -9,8 +9,6 @@ local deferred_thread: thread? = nil
 local batch_depth = 0
 local flushing_eager = false
 local pending_eval: { ReactiveNode<unknown> } = {}
-local pending_set: { [ReactiveNode<unknown>]: boolean } = {}
-local invalidated_while_running: { [ReactiveNode<unknown>]: boolean } = {}
 local processing_node: { [thread]: Node<unknown> } = {}
 local deferred_nodes: { Node<unknown> } = {}
 local version = 0
@@ -64,6 +62,9 @@ export type ReactiveNode<T> = {
 
 	depending_on: { SourceNode<T> | ReactiveNode<T> },
 	dependents: { ReactiveNode<T> },
+
+	queued: boolean?,
+	rerun: boolean?,
 }
 
 export type Node<T> = ReactiveNode<T> | StableNode<T>
@@ -139,18 +140,27 @@ local function push_dependency_to_active_scope<T>(node: SourceNode<T> | Reactive
 end
 
 local function node_destroy<T>(node: Node<T>)
+	if node.effect ~= false then
+		local reactive = node :: ReactiveNode<T>
+
+		reactive.state = "dead"
+		reactive.evaluation = "dead"
+		reactive.queued = false
+		reactive.rerun = false
+	end
+
 	flush_cleanups(node)
 	remove_dependencies(node)
 
 	if node.parent then
 		find_and_swap_pop(node.parent.children, node)
-
 		node.parent = false
 	end
 
 	while node.children[1] do
 		node_destroy(node.children[1])
 	end
+
 	table.clear(node.children)
 end
 
@@ -229,11 +239,11 @@ end
 
 local flush_eager: () -> ()
 local function enqueue_eager(node: ReactiveNode<unknown>)
-	if pending_set[node] then
+	if node.queued then
 		return
 	end
 
-	pending_set[node] = true
+	node.queued = true
 	table.insert(pending_eval, node)
 end
 
@@ -279,8 +289,8 @@ local function graph_update_node<T>(node: ReactiveNode<T>): T
 	local previous_result = node.cached_value
 	local success, res = graph_run_as(node, node.effect, previous_result)
 
-	local rerun = invalidated_while_running[node] == true
-	invalidated_while_running[node] = nil
+	local rerun = node.rerun
+	node.rerun = false
 
 	node.state = "clean"
 
@@ -359,15 +369,21 @@ local function graph_evaluate_node<T>(node: SourceNode<T> | ReactiveNode<T>): T
 end
 
 local function graph_invalidate_loop<T>(node: SourceNode<T> | ReactiveNode<T>)
-	if node.state == "dirty" then
+	if node.state == "dirty" or node.state == "dead" then
 		return
 	end
 
 	for _, dependent in node.dependents do
+		local state = dependent.state
+		if state == "dirty" or state == "dead" then
+			continue
+		end
+
 		graph_invalidate_loop(dependent)
 
-		if type(dependent.state) == "thread" then
-			invalidated_while_running[dependent] = true
+		if state ~= "clean" then
+			-- The remaining possible state is a running thread
+			dependent.rerun = true
 		elseif dependent.evaluation == "eager" or dependent.evaluation == "async" then
 			dependent.state = "dirty"
 			enqueue_eager(dependent)
@@ -380,38 +396,38 @@ local function graph_invalidate_loop<T>(node: SourceNode<T> | ReactiveNode<T>)
 end
 
 flush_eager = function()
-	if flushing_eager or batch_depth > 0 then
+	if flushing_eager or batch_depth > 0 or pending_eval[1] == nil then
 		return
 	end
 
 	flushing_eager = true
 
-	local success, err = pcall(function()
-		local index = 1
+	local index = 1
 
-		while index <= #pending_eval do
-			local node = pending_eval[index]
-			pending_set[node] = nil
+	while index <= #pending_eval do
+		local node = pending_eval[index]
+		node.queued = false
 
-			if node.state ~= "dead" then
-				local evaluated, evaluation_error = graph_run_as(nil, graph_evaluate_node, node)
+		if node.state ~= "dead" then
+			local evaluated, evaluation_error = graph_run_as(nil, graph_evaluate_node, node)
 
-				if not evaluated then
-					error(evaluation_error, 0)
+			if not evaluated then
+				for pending_index = index + 1, #pending_eval do
+					pending_eval[pending_index].queued = false
 				end
-			end
 
-			index += 1
+				table.clear(pending_eval)
+				flushing_eager = false
+
+				error(evaluation_error, 0)
+			end
 		end
-	end)
+
+		index += 1
+	end
 
 	table.clear(pending_eval)
-	table.clear(pending_set)
 	flushing_eager = false
-
-	if not success then
-		error(err, 0)
-	end
 end
 
 local function invalidate<T>(node: ReactiveNode<T> | SourceNode<T>)

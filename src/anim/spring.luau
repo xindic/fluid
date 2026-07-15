@@ -64,9 +64,13 @@ local function step_spring(state: SpringState, delta_time: number)
 			next_velocity = 0
 		end
 
+		local absolute_velocity = if next_velocity < 0 then -next_velocity else next_velocity
+		if absolute_velocity > max_velocity then
+			max_velocity = absolute_velocity
+		end
+
 		state.position[index] = target + next_delta
 		state.velocity[index] = next_velocity
-		max_velocity = math.max(max_velocity, math.abs(next_velocity))
 		distance_squared += next_delta * next_delta
 	end
 
@@ -98,7 +102,7 @@ function spring.create<T>(
 	local starting_datatype, starting_position, value_type = values.pack(initial :: any)
 
 	local spring_state: SpringState = {
-		position = table.clone(starting_position),
+		position = starting_position,
 		velocity = table.create(value_type.count, 0),
 		target = starting_position,
 
@@ -122,10 +126,12 @@ function spring.create<T>(
 	local function on_update()
 		local next_target = pack_checked(read(input))
 
+		local target_changed = packed_values_differ(spring_state.target, next_target, spring_state.elements)
+		spring_state.target = next_target
+
 		-- The first reactive evaluation sees the initial target.
 		-- Do not activate a spring that has nowhere to move.
-		if packed_values_differ(spring_state.target, next_target, spring_state.elements) then
-			spring_state.target = next_target
+		if target_changed then
 			active_springs[spring_state] = output
 		end
 

@@ -40,13 +40,14 @@ local function step(delta_time: number)
 	scheduler.step(delta_time)
 
 	graph.flush_deferred_nodes()
+	graph.batch(function()
+		lerp.step(delta_time)
+		spring.step(delta_time)
 
-	lerp.step(delta_time)
-	spring.step(delta_time)
-
-	if tween ~= nil then
-		tween.step(delta_time)
-	end
+		if tween ~= nil then
+			tween.step(delta_time)
+		end
+	end)
 end
 
 if game then
