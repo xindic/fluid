@@ -1,5 +1,5 @@
 local action = require("@self/instances/action")
-local anim_types = require("@self/anim/anim_types")
+local anim_values = require("@self/anim/values")
 local async = require("@self/reactive/async")
 local bind = require("@self/instances/bind")
 local changed = require("@self/instances/changed")
@@ -32,33 +32,26 @@ export type UsedAs<T> = types.UsedAs<T>
 export type Source<T> = types.Source<T>
 export type Action = action.Identity
 export type PropertiesFor<T> = create.PropertiesFor<T>
-export type Animatable = anim_types.Animatable
+export type Animatable = anim_values.Animatable
 
 local scheduler_thread: thread? = nil
 
 local function step(delta_time: number)
-	-- This will call intervals
 	scheduler.step(delta_time)
 
-	-- Runs deferred nodes
 	graph.flush_deferred_nodes()
 
-	-- Finally, after all state is reconciled, we animate
 	lerp.step(delta_time)
 	spring.step(delta_time)
+
+	if tween ~= nil then
+		tween.step(delta_time)
+	end
 end
 
 if game then
 	local RunService = game:GetService("RunService")
 	tween = require("@self/anim/tween")
-
-	local old_step = step
-	local function step_roblox(delta_time: number)
-		old_step(delta_time)
-		tween.step(delta_time)
-	end
-
-	step = step_roblox
 
 	scheduler_thread = task.spawn(function()
 		while true do
@@ -99,6 +92,7 @@ fluid.show = show
 fluid.switch = switch
 fluid.show_delay = show_delay
 fluid.switch_delay = switch_delay
+fluid.batch = graph.batch
 
 -- Animation
 fluid.lerp = lerp.create

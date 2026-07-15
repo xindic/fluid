@@ -8,10 +8,19 @@ local active_animations = {}
 local lerp_functions: { [string]: (any, any, number) -> any } = {
 	number = math.lerp,
 	vector = vector.lerp,
-	Vector2 = vector.lerp,
-	Vector3 = vector.lerp,
-	UDim2 = UDim2.new().Lerp,
 }
+
+function lerp_functions.Vector2(initial: Vector2, goal: Vector2, ratio: number): Vector2
+	return vector.lerp(initial, goal, ratio)
+end
+
+function lerp_functions.Vector3(initial: Vector3, goal: Vector3, ratio: number): Vector3
+	return vector.lerp(initial, goal, ratio)
+end
+
+function lerp_functions.UDim2(initial: UDim2, goal: UDim2, ratio: number): UDim2
+	return initial:Lerp(goal, ratio)
+end
 
 function lerp_functions.CFrame(initial: CFrame, goal: CFrame, ratio: number)
 	return initial:Lerp(goal, ratio)

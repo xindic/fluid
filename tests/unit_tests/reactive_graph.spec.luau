@@ -365,6 +365,184 @@ local function tests()
 		end)
 	)
 
+
+	TEST(
+		"batch",
+		wrap_root(function()
+			do
+				CASE("eager updates remain immediate outside a batch")
+				local value = fluid.source(0)
+				local runs = 0
+
+				fluid.effect(function()
+					value()
+					runs += 1
+				end)
+
+				CHECK(runs == 1)
+
+				value(1)
+
+				CHECK(runs == 2)
+			end
+
+			do
+				CASE("coalesces repeated writes and exposes final values")
+				local first = fluid.source(0)
+				local second = fluid.source(0)
+
+				local runs = 0
+				local observed_first = 0
+				local observed_second = 0
+
+				fluid.effect(function()
+					observed_first = first()
+					observed_second = second()
+					runs += 1
+				end)
+
+				CHECK(runs == 1)
+
+				graph.batch(function()
+					first(1)
+					second(2)
+					first(3)
+
+					CHECK(runs == 1)
+				end)
+
+				CHECK(runs == 2)
+				CHECK(observed_first == 3)
+				CHECK(observed_second == 2)
+			end
+
+			do
+				CASE("deduplicates an effect reached through multiple dependencies")
+				local first = fluid.source(0)
+				local second = fluid.source(0)
+				local sum = fluid.derive(function()
+					return first() + second()
+				end)
+
+				local runs = 0
+				local observed = 0
+
+				fluid.effect(function()
+					observed = sum()
+					runs += 1
+				end)
+
+				graph.batch(function()
+					first(4)
+					second(6)
+				end)
+
+				CHECK(runs == 2)
+				CHECK(observed == 10)
+			end
+
+			do
+				CASE("supports nested batches without flushing early")
+				local first = fluid.source(0)
+				local second = fluid.source(0)
+				local runs = 0
+
+				fluid.effect(function()
+					first()
+					second()
+					runs += 1
+				end)
+
+				graph.batch(function()
+					first(1)
+
+					graph.batch(function()
+						second(2)
+					end)
+
+					CHECK(runs == 1)
+
+					first(3)
+				end)
+
+				CHECK(runs == 2)
+				CHECK(first() == 3)
+				CHECK(second() == 2)
+			end
+
+			do
+				CASE("returns all callback values")
+				local first, second, third = graph.batch(function()
+					return 1, nil, "three"
+				end)
+
+				CHECK(first == 1)
+				CHECK(second == nil)
+				CHECK(third == "three")
+			end
+
+			do
+				CASE("flushes queued updates and restores batching after callback errors")
+				local value = fluid.source(0)
+				local runs = 0
+
+				fluid.effect(function()
+					value()
+					runs += 1
+				end)
+
+				local success, err = pcall(function()
+					graph.batch(function()
+						value(1)
+						error("batch callback failure")
+					end)
+				end)
+
+				CHECK(success == false)
+				CHECK(string.find(tostring(err), "batch callback failure", 1, true) ~= nil)
+				CHECK(runs == 2)
+				CHECK(value() == 1)
+
+				value(2)
+
+				CHECK(runs == 3)
+				CHECK(value() == 2)
+			end
+
+			do
+				CASE("processes eager updates queued while flushing")
+				local trigger = fluid.source(0)
+				local result = fluid.source(0)
+
+				local trigger_runs = 0
+				local result_runs = 0
+
+				fluid.effect(function()
+					local value = trigger()
+					trigger_runs += 1
+
+					if value > 0 then
+						result(value * 2)
+					end
+				end)
+
+				fluid.effect(function()
+					result()
+					result_runs += 1
+				end)
+
+				graph.batch(function()
+					trigger(5)
+				end)
+
+				CHECK(trigger_runs == 2)
+				CHECK(result_runs == 2)
+				CHECK(result() == 10)
+			end
+		end)
+	)
+
+
 	TEST(
 		"async",
 		wrap_root(function()

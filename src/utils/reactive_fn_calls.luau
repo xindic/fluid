@@ -10,10 +10,14 @@ function reactive_fn_calls.no_yield_call<U..., T...>(
 	...: T...
 ): (boolean, U...)
 	local co = coroutine.create(xpcall)
-	local _, ok, a, b, c, d, e = coroutine.resume(co, func, err_handler, ...)
+	local resumed, ok, a, b, c, d, e = coroutine.resume(co, func, err_handler, ...)
+
+	if not resumed then
+		return false, err_handler(ok)
+	end
 
 	if coroutine.status(co) == "suspended" then
-		value = yield_handler(co)
+		local value = yield_handler(co)
 		scheduler.cancel(co)
 		return false, value
 	end

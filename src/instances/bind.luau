@@ -4,47 +4,6 @@ local properties = require("./properties")
 local scheduler = require("../scheduler")
 local types = require("../reactive/types")
 
-type PropertyPair<T> = {
-	tag: "property",
-	name: string,
-	value: T,
-}
-
-type ReactivePropertyPair<T> = {
-	tag: "reactive_property",
-	name: string,
-	value: () -> T,
-}
-
-type EventPair<T...> = {
-	tag: "event",
-	name: string,
-	event: (T...) -> (),
-}
-
-type ActionPair = {
-	tag: "action",
-	action: action.Identity,
-}
-
-type ChildPair = {
-	tag: "child",
-	value: Instance,
-}
-
-type ReactiveChildPair = {
-	tag: "reactive_child",
-	value: () -> Instance | { Instance },
-}
-
-type Pair =
-	| ReactivePropertyPair<unknown>
-	| PropertyPair<unknown>
-	| EventPair<unknown>
-	| ReactiveChildPair
-	| ActionPair
-	| ChildPair
-
 local function set_property(inst: Instance, property: string, value: any)
 	(inst :: any)[property] = value
 end
@@ -153,94 +112,118 @@ local function bind_reactive_child(inst: Instance, func: () -> Result)
 	graph.evaluate_node(property_node)
 end
 
-local function evaluate(inst: Instance, props: { [unknown & number]: unknown }, existing_array: { Pair }?): { Pair }
-	local resulting_array: { Pair } = existing_array or {}
+type PendingBindings = {
+	property_names: { string },
+	property_values: { any },
+	children: { Instance },
+}
 
-	for key, value in props do
-		local value_is_action = action.is_action(value)
+type ParentBinding = {
+	present: boolean,
+	value: any,
+}
 
-		if type(key) == "number" and type(value) == "table" and value_is_action then
-			table.insert(resulting_array, {
-				tag = "action",
-				action = value,
-			})
-		elseif type(key) == "number" and type(value) == "table" and not value_is_action then
-			evaluate(inst, value :: any, resulting_array)
-		elseif type(key) == "number" and type(value) == "function" then
-			table.insert(resulting_array, {
-				tag = "reactive_child",
-				value = value,
-			})
-		elseif type(key) == "string" and typeof(get_property(inst, key)) == "RBXScriptSignal" then
-			table.insert(resulting_array, {
-				tag = "event",
-				name = key,
-				event = value,
-			})
-		elseif
-			type(key) == "string"
-			and typeof(get_property(inst, key)) ~= "RBXScriptSignal"
-			and type(value) == "function"
-		then
-			table.insert(resulting_array, {
-				tag = "reactive_property",
-				name = key,
-				value = value,
-			})
-		elseif
-			type(key) == "string"
-			and typeof(get_property(inst, key)) ~= "RBXScriptSignal"
-			and type(value) ~= "function"
-		then
-			table.insert(resulting_array, {
-				tag = "property",
-				name = key,
-				value = value,
-			})
-		elseif typeof(value) == "Instance" then
-			table.insert(resulting_array, {
-				tag = "child",
-				value = value,
-			})
-		end
+local function get_member(inst: Instance, name: string): any
+	local success, member = pcall(get_property, inst, name)
+
+	if not success then
+		error(`Property or event {name} does not exist on {inst.ClassName}`, 3)
 	end
 
-	return resulting_array
+	return member
 end
 
-local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
-	local pairings = evaluate(inst, props)
-	local parent: (ReactivePropertyPair<Instance> | PropertyPair<Instance>)? = nil
+local function process_props(
+	inst: Instance,
+	props: { [unknown & number]: unknown },
+	pending: PendingBindings,
+	parent: ParentBinding
+)
+	for key, value in props do
+		local key_type = type(key)
 
-	for _, pairing in pairings do
-		if (pairing.tag == "property" or pairing.tag == "reactive_property") and pairing.name == "Parent" then
-			parent = pairing
+		if key_type == "number" then
+			if action.is_action(value) then
+				(value :: action.Identity).callback(inst)
+			elseif type(value) == "table" then
+				process_props(inst, value :: any, pending, parent)
+			elseif type(value) == "function" then
+				bind_reactive_child(inst, value :: any)
+			elseif typeof(value) == "Instance" then
+				pending.children[#pending.children + 1] = value :: Instance
+			end
+
 			continue
 		end
 
-		if pairing.tag == "property" then
-			scheduler.defer(set_property, inst, pairing.name, pairing.value)
-		elseif pairing.tag == "reactive_property" then
-			bind_property(inst, pairing.name, pairing.value)
-		elseif pairing.tag == "event" then
-			bind_event(inst, pairing.name, pairing.event)
-		elseif pairing.tag == "child" then
-			scheduler.defer(function()
-				pairing.value.Parent = inst
-			end)
-		elseif pairing.tag == "reactive_child" then
-			bind_reactive_child(inst, pairing.value)
-		elseif pairing.tag == "action" then
-			pairing.action.callback(inst)
-		else
-			error("unreachable")
+		if key_type == "string" then
+			local property_name = key :: string
+
+			if property_name == "Parent" then
+				parent.present = true
+				parent.value = value
+				continue
+			end
+
+			local member = get_member(inst, property_name)
+
+			if typeof(member) == "RBXScriptSignal" then
+				assert(type(value) == "function", `Event {property_name} on {inst.ClassName} requires a callback`)
+
+				bind_event(inst, property_name, value :: any)
+			elseif type(value) == "function" then
+				bind_property(inst, property_name, value :: any)
+			else
+				local index = #pending.property_names + 1
+				pending.property_names[index] = property_name
+				pending.property_values[index] = value
+			end
+
+			continue
+		end
+
+		if typeof(value) == "Instance" then
+			pending.children[#pending.children + 1] = value :: Instance
 		end
 	end
+end
 
-	if parent and parent.tag == "reactive_property" then
+local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
+	local pending: PendingBindings = {
+		property_names = {},
+		property_values = {},
+		children = {},
+	}
+
+	local parent: ParentBinding = {
+		present = false,
+		value = nil,
+	}
+
+	process_props(inst, props :: any, pending, parent)
+
+	local property_count = #pending.property_names
+
+	local child_count = #pending.children
+
+	if property_count > 0 or child_count > 0 or (parent.present and type(parent.value) ~= "function") then
+		scheduler.defer(function()
+			for index = 1, property_count do
+				set_property(inst, pending.property_names[index], pending.property_values[index])
+			end
+
+			for index = 1, child_count do
+				pending.children[index].Parent = inst
+			end
+
+			if parent.present and type(parent.value) ~= "function" then
+				set_property(inst, "Parent", parent.value)
+			end
+		end)
+	end
+
+	if parent.present and type(parent.value) == "function" then
 		bind_property(inst, "Parent", parent.value)
-	elseif parent and parent.tag == "property" then
-		set_property(inst, "Parent", parent.value)
 	end
 
 	return inst

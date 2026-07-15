@@ -29,7 +29,7 @@ TEST("scheduler stepping", function()
 		end
 		local disconnect = scheduler.on_render(on_render_callback)
 
-		CHECK(scheduler.connections[1] == on_render_callback)
+		CHECK(scheduler.connections[1].callback == on_render_callback)
 		CHECK(counted_seconds == 0)
 		step_scheduler(1)
 

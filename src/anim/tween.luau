@@ -1,165 +1,168 @@
 local TweenService = game:GetService("TweenService")
 
-local anim_types = require("./anim_types")
 local graph = require("../reactive/graph")
 local lerp = require("./lerp")
 local read = require("../utils/read")
 local types = require("../reactive/types")
+local values = require("./values")
 
-type TweenState = {
-	start: any,
-	current: any,
-	target: any,
+local active_tweens: { TweenState<values.Animatable> } = {}
 
-	datatype: string,
-
-	start_time: number,
-	active_tween_info: TweenInfo,
+type TweenState<T> = {
+	output: graph.SourceNode<T>,
+	start: T,
+	current: T,
+	target: T,
+	elapsed: number,
+	info: TweenInfo,
+	lerp_fn: (T, T, number) -> T,
+	active: boolean,
 }
 
-local active_tweens: { [TweenState]: graph.SourceNode<anim_types.Animatable> } = {}
-
-local function restart_tween(
-	state: TweenState,
-	target: any,
-	output: graph.SourceNode<anim_types.Animatable>
-)
-	state.start = table.clone(state.current)
+local function activate<T>(state: TweenState<T>, target: T)
+	state.start = state.current
 	state.target = target
-	state.start_time = os.clock()
+	state.elapsed = 0
 
-	active_tweens[state] = output
+	if not state.active then
+		state.active = true
+		table.insert(active_tweens, state)
+	end
+end
+
+local function remove_active(index: number)
+	local last = #active_tweens
+	local state = active_tweens[index]
+	state.active = false
+	active_tweens[index] = active_tweens[last]
+	active_tweens[last] = nil
+end
+
+local function tween_alpha(info: TweenInfo, elapsed: number): (number, boolean)
+	if elapsed < info.DelayTime then
+		return 0, false
+	end
+
+	local local_time = elapsed - info.DelayTime
+	local duration = info.Time
+
+	if duration <= 0 then
+		return if info.Reverses then 0 else 1, true
+	end
+
+	local cycle_count = info.RepeatCount + 1
+	local infinite = info.RepeatCount < 0
+
+	local phases_per_cycle = if info.Reverses then 2 else 1
+	local cycle_duration = duration * phases_per_cycle
+
+	if not infinite then
+		local total_duration = cycle_duration * cycle_count
+
+		if local_time >= total_duration then
+			return if info.Reverses then 0 else 1, true
+		end
+	end
+
+	local phase = math.floor(local_time / duration)
+	local alpha = (local_time % duration) / duration
+
+	if info.Reverses and phase % 2 == 1 then
+		alpha = 1 - alpha
+	end
+
+	return TweenService:GetValue(alpha, info.EasingStyle, info.EasingDirection), false
 end
 
 local tween = {}
 
-local function step_tween(state: TweenState): boolean
-	local info = state.active_tween_info
+function tween.create<T>(input: types.UsedAs<T>, info: types.UsedAs<TweenInfo>?): () -> read.CastIntoValue<T>
+	local owner = graph.assert_stable_parent()
 
-	local elapsed = os.clock() - state.start_time
-	if elapsed < info.DelayTime then
-		return false
-	end
+	local initial = read(input)
+	local initial_info = read(info or TweenInfo.new(0))
+	local kind = typeof(initial)
+	local lerp_fn = lerp.functions[kind]
 
-	elapsed -= info.DelayTime
+	assert(lerp_fn ~= nil, `unsupported tween datatype {kind}`)
 
-	local duration = info.Time
-
-	if duration <= 0 then
-		state.current = state.target
-
-		return true
-	end
-
-	local total_cycles = info.RepeatCount + 1
-	local infinite = info.RepeatCount < 0
-
-	local finished = false
-	local alpha
-
-	if not infinite and elapsed >= total_cycles * duration then
-		finished = true
-		alpha = if info.Reverses and total_cycles % 2 == 0 then 0 else 1
-	else
-		local cycle = math.floor(elapsed / duration)
-
-		alpha = (elapsed % duration) / duration
-
-		if info.Reverses and cycle % 2 == 1 then
-			alpha = 1 - alpha
-		end
-
-		alpha = TweenService:GetValue(alpha, info.EasingStyle, info.EasingDirection)
-	end
-
-	state.current = lerp.functions[state.datatype](state.current, state.start, alpha)
-
-	return finished
-end
-
-function tween.create<T>(
-	input: types.UsedAs<T>,
-	info: types.UsedAs<TweenInfo>?
-): () -> read.CastIntoValue<T>
-	local tween_info = info or TweenInfo.new(0)
-
-	graph.set_group(graph.new_group("tween"))
-
-	local output = graph.create_source_node(read(input))
-
-	local call = graph.evaluate_node(output :: T)
-	assert(call.success)
-
-	local initial_tween_info = read(tween_info)
-
-	local tween_state: TweenState = {
-		start = call.value,
-		current = call.value,
-		target = call.value,
-
-		datatype = typeof(call.value),
-
-		start_time = os.clock(),
-		active_tween_info = initial_tween_info,
+	local output: graph.SourceNode<T> = graph.create_source_node(initial)
+	local state: TweenState<T> = {
+		output = output,
+		start = initial,
+		current = initial,
+		target = initial,
+		elapsed = 0,
+		info = initial_info,
+		lerp_fn = lerp_fn,
+		active = false,
 	}
 
-	local function on_input_update()
-		local input_as_value = read(input)
-		assert(
-			typeof(input_as_value) == tween_state.datatype,
-			"Can't switch the data types of a tween"
-		)
-		restart_tween(tween_state, input_as_value, output :: any)
-		return nil
-	end
+	local function update_goal()
+		local target = read(input)
+		assert(typeof(target) == kind, "Can't switch the data types of a tween")
 
-	local function on_tween_info_update()
-		local new_tween_info = read(tween_info)
-
-		if tween_state.active_tween_info ~= new_tween_info then
-			tween_state.active_tween_info = new_tween_info
-			tween_state.start = table.clone(tween_state.current)
-			tween_state.start_time = os.clock()
-			active_tweens[tween_state] = output
+		if target ~= state.target then
+			activate(state, target)
 		end
-
-		return nil
 	end
 
-	local goal_node = graph.create_reactive_node(
-		graph.assert_stable_parent(),
-		on_input_update,
-		"deferred",
-		read(input)
-	)
+	local function update_info()
+		local next_info = read(info or initial_info)
 
+		if next_info ~= state.info then
+			state.info = next_info
+
+			if state.active then
+				activate(state, state.target)
+			end
+		end
+	end
+
+	local goal_node = graph.create_reactive_node(owner, update_goal :: any, "deferred")
 	graph.evaluate_node(goal_node)
 
-	local tween_info_node = graph.create_reactive_node(
-		graph.assert_stable_parent(),
-		on_tween_info_update,
-		"deferred",
-		read(tween_info)
-	)
+	if info ~= nil then
+		local info_node = graph.create_reactive_node(owner, update_info :: any, "deferred")
+		graph.evaluate_node(info_node)
+	end
 
-	graph.evaluate_node(tween_info_node)
-
-	graph.clear_group()
+	graph.push_cleanup(owner, function()
+		state.active = false
+	end)
 
 	return function()
-		graph.push_dependency(output :: T)
+		graph.push_dependency(output)
 		return output.cached_value
 	end
 end
 
 function tween.step(delta_time: number)
-	for tween_state, node in active_tweens do
-		local finished = step_tween(tween_state)
+	local index = 1
 
-		graph.update_source_node(node, tween_state.current)
+	while index <= #active_tweens do
+		local state = active_tweens[index]
+
+		if not state.active then
+			remove_active(index)
+			continue
+		end
+
+		state.elapsed += delta_time
+		local alpha, finished = tween_alpha(state.info, state.elapsed)
 
 		if finished then
-			active_tweens[tween_state] = nil
+			state.current = if state.info.Reverses then state.start else state.target
+		else
+			state.current = state.lerp_fn(state.start, state.target, alpha)
+		end
+
+		graph.update_node(state.output, state.current)
+
+		if finished then
+			remove_active(index)
+		else
+			index += 1
 		end
 	end
 end

@@ -6,7 +6,11 @@ local types = require("./types")
 
 local dev_mode = true
 local deferred_thread: thread? = nil
+local batch_depth = 0
+local flushing_eager = false
 local pending_eval: { ReactiveNode<unknown> } = {}
+local pending_set: { [ReactiveNode<unknown>]: boolean } = {}
+local invalidated_while_running: { [ReactiveNode<unknown>]: boolean } = {}
 local processing_node: { [thread]: Node<unknown> } = {}
 local deferred_nodes: { Node<unknown> } = {}
 local version = 0
@@ -223,6 +227,16 @@ local function graph_defer_node<T>(node: ReactiveNode<T>)
 	end
 end
 
+local flush_eager: () -> ()
+local function enqueue_eager(node: ReactiveNode<unknown>)
+	if pending_set[node] then
+		return
+	end
+
+	pending_set[node] = true
+	table.insert(pending_eval, node)
+end
+
 local function graph_update_node<T>(node: ReactiveNode<T>): T
 	local should_reevaluate = #node.depending_on == 0
 	for _, dependency in node.depending_on do
@@ -261,21 +275,38 @@ local function graph_update_node<T>(node: ReactiveNode<T>): T
 	remove_dependencies(node)
 
 	node.state = coroutine.running()
+
 	local previous_result = node.cached_value
 	local success, res = graph_run_as(node, node.effect, previous_result)
-	-- we mark it as clean and bump the evaluation value since we don't
-	-- want to re-run the node even if it errored
+
+	local rerun = invalidated_while_running[node] == true
+	invalidated_while_running[node] = nil
+
 	node.state = "clean"
 
 	if success then
 		push_dependency_to_active_scope(node)
 
-		if node.evaluation ~= "eager" and is_similar(previous_result, res) or node.evaluation == "async" then
-			return node.cached_value
+		local should_commit = not (
+			(node.evaluation ~= "eager" and is_similar(previous_result, res)) or node.evaluation == "async"
+		)
+
+		if should_commit then
+			node.last_evaluation = bump_version()
+			node.cached_value = res
 		end
 
-		node.last_evaluation = bump_version()
-		node.cached_value = res
+		if rerun then
+			if node.evaluation == "eager" or node.evaluation == "async" then
+				node.state = "dirty"
+				enqueue_eager(node)
+				flush_eager()
+			elseif node.evaluation == "deferred" then
+				graph_defer_node(node)
+			elseif node.evaluation == "lazy" then
+				node.state = "dirty"
+			end
+		end
 
 		return node.cached_value
 	else
@@ -332,30 +363,60 @@ local function graph_invalidate_loop<T>(node: SourceNode<T> | ReactiveNode<T>)
 		return
 	end
 
-	for _, value in node.dependents do
-		graph_invalidate_loop(value)
-		if value.evaluation == "eager" or value.evaluation == "async" then
-			value.state = "dirty"
-			table.insert(pending_eval, value)
-		elseif value.evaluation == "deferred" then
-			graph_defer_node(value)
-		elseif value.evaluation == "lazy" then
-			value.state = "dirty"
+	for _, dependent in node.dependents do
+		graph_invalidate_loop(dependent)
+
+		if type(dependent.state) == "thread" then
+			invalidated_while_running[dependent] = true
+		elseif dependent.evaluation == "eager" or dependent.evaluation == "async" then
+			dependent.state = "dirty"
+			enqueue_eager(dependent)
+		elseif dependent.evaluation == "deferred" then
+			graph_defer_node(dependent)
+		elseif dependent.evaluation == "lazy" then
+			dependent.state = "dirty"
 		end
+	end
+end
+
+flush_eager = function()
+	if flushing_eager or batch_depth > 0 then
+		return
+	end
+
+	flushing_eager = true
+
+	local success, err = pcall(function()
+		local index = 1
+
+		while index <= #pending_eval do
+			local node = pending_eval[index]
+			pending_set[node] = nil
+
+			if node.state ~= "dead" then
+				local evaluated, evaluation_error = graph_run_as(nil, graph_evaluate_node, node)
+
+				if not evaluated then
+					error(evaluation_error, 0)
+				end
+			end
+
+			index += 1
+		end
+	end)
+
+	table.clear(pending_eval)
+	table.clear(pending_set)
+	flushing_eager = false
+
+	if not success then
+		error(err, 0)
 	end
 end
 
 local function invalidate<T>(node: ReactiveNode<T> | SourceNode<T>)
 	graph_invalidate_loop(node)
-
-	for _, node in pending_eval do
-		for _, dependent in node.depending_on do
-			run_as_unsafe(nil, graph_evaluate_node, dependent)
-		end
-
-		graph_run_as(nil, graph_evaluate_node, node)
-	end
-	table.clear(pending_eval)
+	flush_eager()
 end
 
 function graph.flush_deferred_nodes()
@@ -438,6 +499,22 @@ function graph.update_node<T>(node: ReactiveNode<T> | SourceNode<T>, value: T)
 	node.last_evaluation = bump_version()
 	node.cached_value = value
 	invalidate(node)
+end
+
+function graph.batch<T...>(callback: () -> T...): T...
+	batch_depth += 1
+	local results = table.pack(pcall(callback))
+	batch_depth -= 1
+
+	if batch_depth == 0 then
+		flush_eager()
+	end
+
+	if not results[1] then
+		error(results[2], 0)
+	end
+
+	return table.unpack(results, 2, results.n)
 end
 
 function graph.push_cleanup<T>(scope: Node<T>, cleanup: () -> ())
