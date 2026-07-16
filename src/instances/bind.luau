@@ -169,7 +169,6 @@ local function process_props(
 
 			if typeof(member) == "RBXScriptSignal" then
 				assert(type(value) == "function", `Event {property_name} on {inst.ClassName} requires a callback`)
-
 				bind_event(inst, property_name, value :: any)
 			elseif type(value) == "function" then
 				bind_property(inst, property_name, value :: any)
@@ -206,15 +205,13 @@ local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
 	local child_count = #pending.children
 
 	if property_count > 0 or child_count > 0 then
-		scheduler.defer(function()
-			for index = 1, property_count do
-				set_property(inst, pending.property_names[index], pending.property_values[index])
-			end
+		for index = 1, property_count do
+			set_property(inst, pending.property_names[index], pending.property_values[index])
+		end
 
-			for index = 1, child_count do
-				pending.children[index].Parent = inst
-			end
-		end)
+		for index = 1, child_count do
+			pending.children[index].Parent = inst
+		end
 	end
 
 	if parent.present then
