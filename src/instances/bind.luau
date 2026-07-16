@@ -1,12 +1,35 @@
 local action = require("./action")
 local graph = require("../reactive/graph")
 local properties = require("./properties")
-local scheduler = require("../scheduler")
 local types = require("../reactive/types")
 
-local function set_property(inst: Instance, property: string, value: any)
-	(inst :: any)[property] = value
-end
+type Result = Instance | { Result } | () -> Result
+
+type PropertyBinding =
+	{
+		kind: "static",
+		value: any,
+	}
+	| {
+		kind: "reactive",
+		value: types.Readable<any>,
+	}
+
+type EventBinding = {
+	name: string,
+	callback: any,
+}
+type ChildBinding = Instance | (() -> Result)
+
+type PendingBindings = {
+	properties: { [string]: PropertyBinding },
+	children: { ChildBinding },
+
+	events: { EventBinding },
+	actions: { action.Identity },
+
+	parent: PropertyBinding?,
+}
 
 local function get_property(inst: Instance, property: string): any
 	return (inst :: any)[property]
@@ -14,7 +37,7 @@ end
 
 local function bind_property<T>(inst: Instance, property: string, value: types.Readable<T>)
 	local property_node = graph.create_reactive_node(graph.assert_stable_parent(), function()
-		set_property(inst, property, value())
+		inst[property] = value()
 		return nil
 	end, "eager", nil)
 
@@ -29,8 +52,6 @@ local function bind_event(inst: Instance, event_name: string, func: <T...>(T...)
 		connection:Disconnect()
 	end)
 end
-
-type Result = Instance | { Result } | () -> Result
 
 local function reactive_child_effect(
 	inst: Instance,
@@ -48,6 +69,9 @@ local function reactive_child_effect(
 		for old_inst in current_child_set do
 			old_inst.Parent = nil
 		end
+
+		table.clear(current_child_set)
+		table.clear(new_child_set)
 
 		return sets
 	end
@@ -112,17 +136,6 @@ local function bind_reactive_child(inst: Instance, func: () -> Result)
 	graph.evaluate_node(property_node)
 end
 
-type PendingBindings = {
-	property_names: { string },
-	property_values: { any },
-	children: { Instance },
-}
-
-type ParentBinding = {
-	present: boolean,
-	value: any,
-}
-
 local function get_member(inst: Instance, name: string): any
 	local success, member = pcall(get_property, inst, name)
 
@@ -133,93 +146,109 @@ local function get_member(inst: Instance, name: string): any
 	return member
 end
 
-local function process_props(
-	inst: Instance,
-	props: { [unknown & number]: unknown },
-	pending: PendingBindings,
-	parent: ParentBinding
-)
+local function process_props(inst: Instance, props: { [any]: any }, pending: PendingBindings)
+	local nested_props: { { [any]: any } } = {}
+
 	for key, value in props do
 		local key_type = type(key)
 
-		if key_type == "number" then
-			if action.is_action(value) then
-				(value :: action.Identity).callback(inst)
-			elseif type(value) == "table" then
-				process_props(inst, value :: any, pending, parent)
-			elseif type(value) == "function" then
-				bind_reactive_child(inst, value :: any)
-			elseif typeof(value) == "Instance" then
-				pending.children[#pending.children + 1] = value :: Instance
+		if key_type == "string" then
+			local name = key
+
+			if name == "Parent" then
+				pending.parent = if type(value) == "function"
+					then { kind = "reactive", value = value }
+					else { kind = "static", value = value }
+				continue
+			end
+
+			local member = get_member(inst, name)
+
+			if typeof(member) == "RBXScriptSignal" then
+				assert(type(value) == "function", `Event {name} on {inst.ClassName} requires a callback`)
+
+				table.insert(pending.events, {
+					name = name,
+					callback = value,
+				})
+			else
+				pending.properties[name] = if type(value) == "function"
+					then { kind = "reactive", value = value }
+					else { kind = "static", value = value }
 			end
 
 			continue
 		end
 
-		if key_type == "string" then
-			local property_name = key :: string
-
-			if property_name == "Parent" then
-				parent.present = true
-				parent.value = value
-				continue
-			end
-
-			local member = get_member(inst, property_name)
-
-			if typeof(member) == "RBXScriptSignal" then
-				assert(type(value) == "function", `Event {property_name} on {inst.ClassName} requires a callback`)
-				bind_event(inst, property_name, value :: any)
-			elseif type(value) == "function" then
-				bind_property(inst, property_name, value :: any)
-			else
-				local index = #pending.property_names + 1
-				pending.property_names[index] = property_name
-				pending.property_values[index] = value
+		if key_type == "number" then
+			if action.is_action(value) then
+				table.insert(pending.actions, value)
+			elseif type(value) == "table" then
+				table.insert(nested_props, value)
+			elseif type(value) == "function" or typeof(value) == "Instance" then
+				table.insert(pending.children, value)
 			end
 
 			continue
 		end
 
 		if typeof(value) == "Instance" then
-			pending.children[#pending.children + 1] = value :: Instance
+			table.insert(pending.children, value)
 		end
+	end
+
+	for index = 1, #nested_props do
+		process_props(inst, nested_props[index], pending)
 	end
 end
 
 local function bind<T>(inst: Instance & T, props: properties.PropertiesFor<T>)
 	local pending: PendingBindings = {
-		property_names = {},
-		property_values = {},
+		properties = {},
 		children = {},
+
+		events = {},
+		actions = {},
+
+		parent = nil,
 	}
 
-	local parent: ParentBinding = {
-		present = false,
-		value = nil,
-	}
+	process_props(inst, props, pending)
 
-	process_props(inst, props :: any, pending, parent)
-
-	local property_count = #pending.property_names
-	local child_count = #pending.children
-
-	if property_count > 0 or child_count > 0 then
-		for index = 1, property_count do
-			set_property(inst, pending.property_names[index], pending.property_values[index])
-		end
-
-		for index = 1, child_count do
-			pending.children[index].Parent = inst
+	for name, binding in pending.properties do
+		if binding.kind == "reactive" then
+			bind_property(inst, name, binding.value)
+		else
+			inst[name] = binding.value
 		end
 	end
 
-	if parent.present then
-		if type(parent.value) == "function" then
+	for index = 1, #pending.children do
+		local child = pending.children[index]
+
+		if typeof(child) == "Instance" then
+			child.Parent = inst
+		else
+			bind_reactive_child(inst, child :: () -> Result)
+		end
+	end
+
+	local parent = pending.parent
+	if parent ~= nil then
+		if parent.kind == "reactive" then
 			bind_property(inst, "Parent", parent.value)
 		else
-			set_property(inst, "Parent", parent.value)
+			inst.Parent = parent.value
 		end
+	end
+
+	for index = 1, #pending.events do
+		local event = pending.events[index]
+		bind_event(inst, event.name, event.callback)
+	end
+
+	for index = 1, #pending.actions do
+		pending.actions[index].callback(inst)
 	end
 
 	return inst
